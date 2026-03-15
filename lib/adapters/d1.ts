@@ -1,5 +1,5 @@
 import type { Db, DbStatement } from "../backend";
-import { MIGRATIONS } from "../db-schema";
+import { SCHEMA, MIGRATIONS } from "../db-schema";
 
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
@@ -20,6 +20,7 @@ export function createD1Db(binding: unknown): Db {
 
   if (!_migrated) {
     _migrated = true;
+    d1.exec(SCHEMA).catch(() => {/* tables already exist */});
     for (const sql of MIGRATIONS) {
       d1.exec(sql).catch(() => {/* column already exists */});
     }

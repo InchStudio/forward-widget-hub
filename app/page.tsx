@@ -19,6 +19,8 @@ import {
   Trash2,
   RefreshCw,
   Lock,
+  Pencil,
+  ImagePlus,
 } from "lucide-react";
 
 interface FileItem {
@@ -44,6 +46,28 @@ interface Module {
 interface Collection {
   id: string; slug: string; title: string; description: string; icon_url: string;
   fwdUrl: string; pageUrl: string; modules: Module[]; source_url: string | null;
+}
+
+async function fetchWithProxy(url: string): Promise<Response> {
+  // 1. Try direct browser fetch
+  try {
+    const res = await fetch(url);
+    if (res.ok) return res;
+    // Non-ok but reachable — don't retry via proxy, throw directly
+    throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    // Network/CORS error (TypeError) — fall through to proxy
+    if (!(e instanceof TypeError)) throw e;
+  }
+
+  // 2. Fallback: server-side proxy
+  const proxyRes = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`);
+  if (proxyRes.ok) return proxyRes;
+
+  // 3. Both failed — build informative error
+  const errBody = await proxyRes.json().catch(() => null);
+  const proxyDetail = errBody?.error || `HTTP ${proxyRes.status}`;
+  throw new Error(`跨域下载失败，服务端代理也无法访问 (${proxyDetail})。请手动下载文件后拖拽上传`);
 }
 
 async function readNdjsonStream(
@@ -236,8 +260,7 @@ export default function Home() {
       ));
 
       try {
-        const res = await fetch(widget.url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const res = await fetchWithProxy(widget.url);
         const blob = await res.blob();
         downloadedFiles.push(new File([blob], fname, { type: "application/javascript" }));
         widgetMetas.push({
@@ -246,8 +269,9 @@ export default function Home() {
           source_url: widget.url,
         });
       } catch (e) {
+        const errorMsg = `下载 ${fname} 失败: ${(e as Error).message}`;
         setFiles((prev) => prev.map((f) =>
-          f.id === itemId ? { ...f, status: "error" as const, progress: 100, errorMsg: `下载 ${fname} 失败: ${(e as Error).message}` } : f
+          f.id === itemId ? { ...f, status: "error" as const, progress: 100, errorMsg } : f
         ));
         return;
       }
@@ -436,8 +460,7 @@ export default function Home() {
         f.id === itemId ? { ...f, progress: 20, processingDetail: "正在下载文件..." } : f
       ));
 
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetchWithProxy(url);
       const arrayBuffer = await res.arrayBuffer();
       const text = new TextDecoder().decode(arrayBuffer);
 
@@ -805,8 +828,7 @@ function StandaloneModuleRow({ module: mod, collection, token, onDeleteModule, o
     if (!confirm("确定从原地址重新同步此模块？")) return;
     setSyncingModule(true);
     try {
-      const res = await fetch(mod.source_url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetchWithProxy(mod.source_url);
       const blob = await res.blob();
       const fname = mod.source_url.split("/").pop() || "widget.js";
       const file = new File([blob], fname, { type: "application/javascript" });
@@ -901,6 +923,45 @@ function CollectionSection({ collection, token, onDeleteModule, onDeleteCollecti
   const [syncingModuleId, setSyncingModuleId] = useState<string | null>(null);
   const [moduleUrlInput, setModuleUrlInput] = useState("");
   const [addingByUrl, setAddingByUrl] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(collection.title);
+  const [editDesc, setEditDesc] = useState(collection.description || "");
+  const [editIcon, setEditIcon] = useState<File | null>(null);
+  const [editIconPreview, setEditIconPreview] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const iconInputRef = useRef<HTMLInputElement>(null);
+
+  const handleSaveEdit = async () => {
+    if (!editTitle.trim()) return;
+    setSaving(true);
+    try {
+      const formData = new FormData();
+      formData.append("title", editTitle.trim());
+      formData.append("description", editDesc.trim());
+      if (editIcon) formData.append("icon", editIcon);
+      const res = await fetch(`/api/collections/${collection.slug}?token=${token}`, { method: "PUT", body: formData });
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.error || "保存失败");
+        return;
+      }
+      setEditing(false);
+      setEditIcon(null);
+      setEditIconPreview(null);
+      onRefresh();
+    } catch {
+      alert("保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleIconSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setEditIcon(file);
+    setEditIconPreview(URL.createObjectURL(file));
+  };
 
   const handleReplace = async (moduleId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -922,8 +983,7 @@ function CollectionSection({ collection, token, onDeleteModule, onDeleteCollecti
     if (!confirm("确定从原地址重新同步此合集？")) return;
     setSyncing(true);
     try {
-      const res = await fetch(collection.source_url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetchWithProxy(collection.source_url);
       const text = await res.text();
       const fwd = JSON.parse(text);
       if (!fwd.widgets || !Array.isArray(fwd.widgets)) throw new Error("Invalid .fwd format");
@@ -934,8 +994,7 @@ function CollectionSection({ collection, token, onDeleteModule, onDeleteCollecti
       for (const widget of fwd.widgets) {
         let fname = widget.url.split("/").pop() || "widget.js";
         if (!fname.endsWith(".js")) fname += ".js";
-        const dlRes = await fetch(widget.url);
-        if (!dlRes.ok) throw new Error(`Failed to download ${fname}`);
+        const dlRes = await fetchWithProxy(widget.url);
         const blob = await dlRes.blob();
         downloadedFiles.push(new File([blob], fname, { type: "application/javascript" }));
         widgetMetas.push({
@@ -975,8 +1034,7 @@ function CollectionSection({ collection, token, onDeleteModule, onDeleteCollecti
     if (!confirm("确定从原地址重新同步此模块？")) return;
     setSyncingModuleId(mod.id);
     try {
-      const res = await fetch(mod.source_url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetchWithProxy(mod.source_url);
       const blob = await res.blob();
       const fname = mod.source_url.split("/").pop() || "widget.js";
       const file = new File([blob], fname, { type: "application/javascript" });
@@ -1002,8 +1060,7 @@ function CollectionSection({ collection, token, onDeleteModule, onDeleteCollecti
     try { new URL(url); } catch { alert("请输入有效的 URL"); return; }
     setAddingByUrl(true);
     try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetchWithProxy(url);
       const blob = await res.blob();
       const fname = url.split("/").pop() || "widget.js";
       const file = new File([blob], fname, { type: "application/javascript" });
@@ -1045,32 +1102,83 @@ function CollectionSection({ collection, token, onDeleteModule, onDeleteCollecti
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
       {/* Header */}
       <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
-            {collection.icon_url ? (
-              <img src={collection.icon_url} alt="" className="w-9 h-9 rounded-lg object-cover" />
-            ) : (
-              <div className="w-9 h-9 rounded-lg bg-indigo-50 flex items-center justify-center">
-                <FileJson className="w-4.5 h-4.5 text-indigo-600" />
+        {editing ? (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <input ref={iconInputRef} type="file" accept="image/*" className="hidden" onChange={handleIconSelect} />
+              <button
+                onClick={() => iconInputRef.current?.click()}
+                className="w-9 h-9 rounded-lg border-2 border-dashed border-slate-300 hover:border-indigo-400 flex items-center justify-center flex-shrink-0 overflow-hidden transition-colors"
+                title="更换图标"
+              >
+                {editIconPreview ? (
+                  <img src={editIconPreview} alt="" className="w-full h-full object-cover" />
+                ) : collection.icon_url ? (
+                  <img src={collection.icon_url} alt="" className="w-full h-full object-cover opacity-60" />
+                ) : (
+                  <ImagePlus className="w-4 h-4 text-slate-400" />
+                )}
+              </button>
+              <div className="flex-1 space-y-2">
+                <input
+                  type="text"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="w-full text-sm font-semibold text-slate-800 border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  placeholder="合集标题"
+                />
+                <input
+                  type="text"
+                  value={editDesc}
+                  onChange={(e) => setEditDesc(e.target.value)}
+                  className="w-full text-xs text-slate-500 border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  placeholder="合集描述（可选）"
+                />
               </div>
-            )}
-            <div>
-              <h3 className="font-semibold text-slate-800">{collection.title}</h3>
-              {collection.description && <p className="text-xs text-slate-500">{collection.description}</p>}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { setEditing(false); setEditTitle(collection.title); setEditDesc(collection.description || ""); setEditIcon(null); setEditIconPreview(null); }}
+                className="px-3 py-1.5 text-xs text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >取消</button>
+              <button
+                onClick={handleSaveEdit}
+                disabled={saving || !editTitle.trim()}
+                className="px-3 py-1.5 text-xs text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
+              >{saving ? "保存中..." : "保存"}</button>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded-md">{collection.modules.length} 个模块</span>
-            {collection.source_url && (
-              <button onClick={handleSyncCollection} disabled={syncing} className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50" title="从源地址同步">
-                <RefreshCw className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} />
+        ) : (
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-3">
+              {collection.icon_url ? (
+                <img src={collection.icon_url} alt="" className="w-9 h-9 rounded-lg object-cover" />
+              ) : (
+                <div className="w-9 h-9 rounded-lg bg-indigo-50 flex items-center justify-center">
+                  <FileJson className="w-4.5 h-4.5 text-indigo-600" />
+                </div>
+              )}
+              <div>
+                <h3 className="font-semibold text-slate-800">{collection.title}</h3>
+                {collection.description && <p className="text-xs text-slate-500">{collection.description}</p>}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded-md">{collection.modules.length} 个模块</span>
+              <button onClick={() => { setEditTitle(collection.title); setEditDesc(collection.description || ""); setEditing(true); }} className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="编辑合集">
+                <Pencil className="w-4 h-4" />
               </button>
-            )}
-            <button onClick={onDeleteCollection} className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="删除合集">
-              <Trash2 className="w-4 h-4" />
-            </button>
+              {collection.source_url && (
+                <button onClick={handleSyncCollection} disabled={syncing} className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50" title="从源地址同步">
+                  <RefreshCw className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} />
+                </button>
+              )}
+              <button onClick={onDeleteCollection} className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="删除合集">
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* FWD Link */}

@@ -13,7 +13,7 @@ export async function GET(
   { params }: { params: Promise<{ slug: string }> }
 ) {
   const ua = request.headers.get("user-agent") || "";
-  if (!ua.includes("Forward")) {
+  if (!ua.includes("Forward") && !ua.includes("Rex")) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
